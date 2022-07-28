@@ -56,6 +56,7 @@ def encoder(input_encoder, compression_length):
 def decoder(input_decoder, expanded_shape, inputs=None, name='decoder'):
     h, w, channels = expanded_shape
     h, w = h // 4, w //4
+    print(h, w)
     # Initial Block
     if inputs is None:
         inputs = keras.Input(shape=input_decoder, name='input_layer')
@@ -88,60 +89,49 @@ def main():
     cam_width, cam_height = 1920, 1080
     display_scale = 0.4
     display_width, display_height = (int(cam_width*display_scale),
-                                     int(cam_height*display_scale))
+                                     int(cam_height*display_scale)*2)
     display_width -= display_width % 2
     person_display_width = display_width // 2
-
-##    optimizer = keras.optimizers.Adam(learning_rate = 0.0005)
+    person_display_height = display_height // 2
+    print(display_width, display_height)
     
     # Input shape for the autoencoder, 3 channels (BGR)
-    decompressed_shape = (display_height, person_display_width, 3)
+    decompressed_shape = (person_display_height, person_display_width, 3)
+    print('decompressed_shape: ', decompressed_shape)
     compressed_shape = (200,)
 
     encoder_model, encoder_input_layer, encoder_output_layer = encoder(decompressed_shape, *compressed_shape)
-##    encoder_model.compile()
-##    encoder_input_layer = encoder_model.get_layer(index=0)
-##    encoder_output_layer = encoder_model.get_layer(index=-1)
-    
+
     decoder_model_left, decoder_left_output_layer = decoder(compressed_shape, decompressed_shape, encoder_output_layer, name='decoder_left')
     decoder_model_right, decoder_right_output_layer = decoder(compressed_shape, decompressed_shape, encoder_output_layer, name='decoder_right')
-##    decoder_model_left.compile()
-##    decoder_model_right.compile()
-##    decoder_left_output_layer = decoder_model_left.get_layer(index=-1)
-##    decoder_right_output_layer = decoder_model_right.get_layer(index=-1)
+
     full_model_left = keras.Model(encoder_input_layer, decoder_left_output_layer, name='full_left_model')
     full_model_right = keras.Model(encoder_input_layer, decoder_right_output_layer, name='full_right_model')
+
     full_model_left.compile(optimizer='adam',
                             loss='binary_crossentropy',
                             metrics=['accuracy'])
     full_model_right.compile(optimizer='adam',
                             loss='binary_crossentropy',
                             metrics=['accuracy'])
-    
-##    decoder_left_output_layer = decoder_model_left.get_layer(index=-1)
-##    decoder_right_output_layer = decoder_model_right.get_layer(index=-1)
 
-##    trainable_model_left = keras.Model(encoder_input_layer, decoder_left_output_layer, name='Trainable Left')
-##    trainable_model_right = keras.Model(encoder_input_layer, decoder_right_output_layer, name='Trainable Right')
-    
-##    sample_result = encoder_model(np.zeros((1, *decompressed_shape), dtype=np.float32))
-##    sample_output = decoder_model_left(sample_result).numpy()
-##    print('Sample output shape:', np.shape(sample_output[0]))
-    
+    # Index 0 is the number of the camera.
+    # TODO dynamic camera choice
     with video_capture_wrapper(0, cv.CAP_DSHOW) as cap:
-##        print(cap.getBackendName())
         cap.set(cv.CAP_PROP_FPS, 30.0)
         cap.set(cv.CAP_PROP_FRAME_WIDTH, cam_width)
         cap.set(cv.CAP_PROP_FRAME_HEIGHT, cam_height)
         cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*'MJPG'))
-##        print(cap.get(cv.CAP_PROP_FRAME_WIDTH), cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-##        print(cap.get(cv.CAP_PROP_FPS))
-##        print(string_ord(int(cap.get(cv.CAP_PROP_FOURCC))))
+        
         i_did_the_thing = False
-        frames = []
+        count = 0
+        frames_index = 0
+        frames_left = np.zeros((300, *decompressed_shape), np.float32)
+        frames_right = np.zeros((300, *decompressed_shape), np.float32)
+        bottom_row = np.zeros((person_display_height, display_width, 3), np.uint8)
         while cap.isOpened():
             ret, frame = cap.read()
-            smol = cv.resize(frame, dsize=(display_width, display_height), interpolation=cv.INTER_CUBIC)
+            smol = cv.resize(frame, dsize=(display_width, person_display_height), interpolation=cv.INTER_CUBIC)
             
             person_left = smol[:,person_display_width:]
             person_right = smol[:,:person_display_width]
@@ -151,10 +141,11 @@ def main():
             
             people = (smol[:,display_width//2:], smol[:,:display_width//2])
             
-            people = (np.reshape(person_left, (1, *decompressed_shape)),
-                      np.reshape(person_right, (1, *decompressed_shape)))
+##            people = (np.reshape(person_left/255, (1, *decompressed_shape)),
+##                      np.reshape(person_right/255, (1, *decompressed_shape)))
 
             if not i_did_the_thing:
+                print(smol.dtype)
 ##                print(type(smol))
 ##                print(np.shape(people[0]), np.shape(people[1]))
                 i_did_the_thing = True
@@ -164,22 +155,35 @@ def main():
                     smol[:,:,i] = 0
             # Encode/decode here
             ##################################################################################
-            
-            person_left_training = np.reshape(person_left, (1, *decompressed_shape))
-            person_right_training = np.reshape(person_right, (1, *decompressed_shape))
 
-            full_model_left.fit(person_left_training, person_left_training)
-            full_model_right.fit(person_right_training, person_right_training)
-            
-            fucked_person_left = full_model_right(person_left_training)[0]
-            fucked_person_right = full_model_left(person_right_training)[0]
+            person_left_training = np.reshape(person_left/255, (1, *decompressed_shape))
+            person_right_training = np.reshape(person_right/255, (1, *decompressed_shape))
 
+            if frames_index == 300:
+                print('Training...')
+                
+                full_model_left.fit(frames_left, frames_left)
+                full_model_right.fit(frames_right, frames_right)
             
+            count += 1
+            if count == 10:
+                count = 0
+                print(f'new training frame [{frames_index}/300]')
+                frames_left[frames_index] = person_left/255
+                frames_right[frames_index] = person_right/255
+                frames_index += 1
+                
+                fucked_person_left = (full_model_right(person_left_training).numpy()[0]*255).astype('uint8')
+                fucked_person_right = (full_model_left(person_right_training).numpy()[0]*255).astype('uint8')
+                
+                bottom_row = np.concatenate((fucked_person_left, fucked_person_right), axis=1)
+
+##            top_row = np.concatenate((fucked_person_left, fucked_person_right), axis=1)            
             top_row = np.concatenate((person_left_flipped, person_right_flipped), axis=1)
-            # TODO swap the bottom row ##############
-            bottom_row = np.concatenate((fucked_person_left, fucked_person_right), axis=1)
+##            bottom_row = np.concatenate((person_right_flipped, person_left_flipped), axis=1)
             vis = np.concatenate((top_row, bottom_row), axis=0)
     ##        cv.imshow('Webcam', smol)
+##            cv.imshow('Webcam', top_row)
             cv.imshow('Webcam', vis)
             
             key = chr(cv.waitKey(1) & 0xFF)
@@ -191,6 +195,7 @@ def main():
                 channels = (channels[0],     not channels[1], channels[2])
             elif key == 'r':
                 channels = (channels[0],     channels[1],     not channels[2])
+
     cv.destroyAllWindows()
 
 if __name__ == '__main__':
