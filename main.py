@@ -3,6 +3,7 @@ import cv2 as cv
 import contextlib
 from tensorflow import keras
 from tensorflow.keras import layers
+from keras import backend as K
 
 @contextlib.contextmanager
 def video_capture_wrapper(*args, **kwargs):
@@ -85,6 +86,10 @@ def decoder(input_decoder, expanded_shape, inputs=None, name='decoder'):
     return model, outputs
 
 def main():
+    batch_size = 200
+    starting_learning_rate = 0.01
+    later_learning_rate = 0.001
+    
     channels = (True, True, True)
     cam_width, cam_height = 1920, 1080
     display_scale = 0.4
@@ -108,10 +113,11 @@ def main():
     full_model_left = keras.Model(encoder_input_layer, decoder_left_output_layer, name='full_left_model')
     full_model_right = keras.Model(encoder_input_layer, decoder_right_output_layer, name='full_right_model')
 
-    full_model_left.compile(optimizer='adam',
+    optimizer = keras.optimizers.Adam(learning_rate = starting_learning_rate)
+    full_model_left.compile(optimizer=optimizer,
                             loss='binary_crossentropy',
                             metrics=['accuracy'])
-    full_model_right.compile(optimizer='adam',
+    full_model_right.compile(optimizer=optimizer,
                             loss='binary_crossentropy',
                             metrics=['accuracy'])
 
@@ -124,11 +130,15 @@ def main():
         cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*'MJPG'))
         
         i_did_the_thing = False
+        
         count = 0
         frames_index = 0
-        frames_left = np.zeros((300, *decompressed_shape), np.float32)
-        frames_right = np.zeros((300, *decompressed_shape), np.float32)
+        
+        frames_left = np.zeros((batch_size, *decompressed_shape), np.float32)
+        frames_right = np.zeros((batch_size, *decompressed_shape), np.float32)
+        
         bottom_row = np.zeros((person_display_height, display_width, 3), np.uint8)
+        
         while cap.isOpened():
             ret, frame = cap.read()
             smol = cv.resize(frame, dsize=(display_width, person_display_height), interpolation=cv.INTER_CUBIC)
@@ -138,63 +148,52 @@ def main():
             
             person_left_flipped = cv.flip(person_left, 1)
             person_right_flipped = cv.flip(person_right, 1)
-            
-            people = (smol[:,display_width//2:], smol[:,:display_width//2])
-            
-##            people = (np.reshape(person_left/255, (1, *decompressed_shape)),
-##                      np.reshape(person_right/255, (1, *decompressed_shape)))
-
-            if not i_did_the_thing:
-                print(smol.dtype)
-##                print(type(smol))
-##                print(np.shape(people[0]), np.shape(people[1]))
-                i_did_the_thing = True
-            
-            for i, has_channel in enumerate(channels):
-                if not has_channel:
-                    smol[:,:,i] = 0
-            # Encode/decode here
-            ##################################################################################
 
             person_left_training = np.reshape(person_left/255, (1, *decompressed_shape))
             person_right_training = np.reshape(person_right/255, (1, *decompressed_shape))
 
-            if frames_index == 300:
+            if frames_index == batch_size:
+                frames_index = 0
                 print('Training...')
-                
+
+                # TODO train models simultaneously
+                # https://stackoverflow.com/a/44873889/9081715
                 full_model_left.fit(frames_left, frames_left)
                 full_model_right.fit(frames_right, frames_right)
+
+                if not i_did_the_thing:
+                    K.set_value(full_model_left.optimizer.learning_rate, later_learning_rate)
+                    K.set_value(full_model_right.optimizer.learning_rate, later_learning_rate)
+                    i_did_the_thing = True
+                
+##                frames_left = np.zeros((batch_size, *decompressed_shape), np.float32)
+##                frames_right = np.zeros((batch_size, *decompressed_shape), np.float32)
             
             count += 1
-            if count == 10:
+            if count == 1:
                 count = 0
-                print(f'new training frame [{frames_index}/300]')
+                print(f'new training frame [{frames_index+1}/{batch_size}]')
                 frames_left[frames_index] = person_left/255
                 frames_right[frames_index] = person_right/255
                 frames_index += 1
                 
-                fucked_person_left = (full_model_right(person_left_training).numpy()[0]*255).astype('uint8')
-                fucked_person_right = (full_model_left(person_right_training).numpy()[0]*255).astype('uint8')
+##                fucked_person_left = (full_model_right(person_left_training).numpy()[0]*255).astype('uint8')
+##                fucked_person_right = (full_model_left(person_right_training).numpy()[0]*255).astype('uint8')
+                
+                fucked_person_left = cv.flip((full_model_left(person_left_training).numpy()[0]*255).astype('uint8'), 1)
+                fucked_person_right = cv.flip((full_model_right(person_right_training).numpy()[0]*255).astype('uint8'), 1)
                 
                 bottom_row = np.concatenate((fucked_person_left, fucked_person_right), axis=1)
 
-##            top_row = np.concatenate((fucked_person_left, fucked_person_right), axis=1)            
             top_row = np.concatenate((person_left_flipped, person_right_flipped), axis=1)
 ##            bottom_row = np.concatenate((person_right_flipped, person_left_flipped), axis=1)
             vis = np.concatenate((top_row, bottom_row), axis=0)
-    ##        cv.imshow('Webcam', smol)
 ##            cv.imshow('Webcam', top_row)
             cv.imshow('Webcam', vis)
             
             key = chr(cv.waitKey(1) & 0xFF)
             if not ret or key == 'q':
                 break
-            elif key == 'b':
-                channels = (not channels[0], channels[1],     channels[2])
-            elif key == 'g':
-                channels = (channels[0],     not channels[1], channels[2])
-            elif key == 'r':
-                channels = (channels[0],     channels[1],     not channels[2])
 
     cv.destroyAllWindows()
 
